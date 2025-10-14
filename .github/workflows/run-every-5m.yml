@@ -1,3 +1,4 @@
+# .github/workflows/run-every-5m.yml
 name: PDF Compress every 5 min
 
 on:
@@ -24,19 +25,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Show repo files
-        run: ls -la
-
       - name: Run job
         env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # OAuth (refresh token) secrets
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+
+          # Your job config
           SPREADSHEET_ID: "1JPJ5q2vTvybxlsX29r-YXL3mUBH0Piewz2AIJlSfLwc"
           SHEET_NAME: "Dispatch Details"
-          COL_URL: "9"
-          COL_INVOICE: "7"
+          COL_URL: "12"         # L
+          COL_INVOICE: "7"      # G
           START_ROW: "2"
-          COL_OUTPUT: "12"
-          COL_FLAG: "13"
+          COL_OUTPUT: "12"      # L (overwrite with new link)
+          COL_FLAG: "13"        # M (status)
           DEST_FOLDER_ID: "14WG909MU8e-GepUIe41PQ9yLev22wChK"
         run: |
           python runner.py
