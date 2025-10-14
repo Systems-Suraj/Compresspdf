@@ -27,21 +27,23 @@ jobs:
 
       - name: Run PDF Compressor
         env:
-          # ---- OAuth Secrets ----
+          # ---- OAuth SECRETS (must be set under Settings → Secrets) ----
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
 
-          # ---- Config Variables ----
-          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          # ---- Config VARIABLES (you already added these as repo variables) ----
+          SPREADSHEET_ID: ${{ vars.DEMO_SHEET_ID }}     # maps your variable to what runner.py expects
           SHEET_NAME: ${{ vars.SHEET_NAME }}
           DEST_FOLDER_ID: ${{ vars.DEST_FOLDER_ID }}
 
-          # ---- Column Config ----
-          COL_URL: "12"          # L = source URL
-          COL_INVOICE: "7"       # G = invoice number
+          # ---- Column config (I -> L; logs -> M) ----
+          COL_URL: "9"           # I = source URL
+          COL_INVOICE: "7"       # G = invoice number (filename)
           START_ROW: "2"
-          COL_OUTPUT: "12"       # L = overwrite with compressed link
-          COL_FLAG: "13"         # M = status/log
-          BACKUP_ORIGINAL_TO_K: "true"
-        run: python runner.py
+          COL_OUTPUT: "12"       # L = write compressed view link
+          COL_FLAG: "13"         # M = logs
+          BACKUP_ORIGINAL_TO_K: "true"   # also copy original I→K if K is empty
+        run: |
+          echo "Debug SPREADSHEET_ID length: ${#SPREADSHEET_ID}"
+          python runner.py
