@@ -20,30 +20,28 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run job
+      - name: Run PDF Compressor
         env:
-          # ---- OAuth (these MUST be Action SECRETS) ----
+          # ---- OAuth Secrets ----
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
 
-          # ---- Config (use your repo VARIABLES or hard-code) ----
-          # If you named your repo variable DEMO_SHEET_ID, use: ${{ vars.DEMO_SHEET_ID }}
+          # ---- Config Variables ----
           SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
           SHEET_NAME: ${{ vars.SHEET_NAME }}
           DEST_FOLDER_ID: ${{ vars.DEST_FOLDER_ID }}
 
-          # ---- Columns & behavior ----
-          COL_URL: "12"         # L = source URL
-          COL_INVOICE: "7"      # G = invoice number (for output filename)
+          # ---- Column Config ----
+          COL_URL: "12"          # L = source URL
+          COL_INVOICE: "7"       # G = invoice number
           START_ROW: "2"
-          COL_OUTPUT: "12"      # L = overwrite with compressed link
-          COL_FLAG: "13"        # M = status/log
-          BACKUP_ORIGINAL_TO_K: "true"  # if "true", store original L into column K once
-        run: |
-          python runner.py
+          COL_OUTPUT: "12"       # L = overwrite with compressed link
+          COL_FLAG: "13"         # M = status/log
+          BACKUP_ORIGINAL_TO_K: "true"
+        run: python runner.py
