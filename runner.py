@@ -1,4 +1,4 @@
-import io, os, time, tempfile, requests
+import io, os, time, tempfile, requests, sys
 from PIL import Image
 import fitz  # PyMuPDF
 from google.oauth2.credentials import Credentials
@@ -210,31 +210,36 @@ def main():
     drive_svc, sheets_svc = get_clients()
     ensure_sheet_grid(sheets_svc, SPREADSHEET_ID, SHEET_NAME, min_cols=max(COL_FLAG, COL_OUTPUT), min_rows=2000)
 
-    # Read needed columns
-    cols = sheet_get_columns(sheets_svc, SPREADSHEET_ID, SHEET_NAME, [(COL_URL, START_ROW), (COL_INVOICE, START_ROW)])
-    urls = cols.get(COL_URL, [])
+    # --- Read needed columns in one go: G (invoice), I (source url), L (output) ---
+    cols = sheet_get_columns(
+        sheets_svc, SPREADSHEET_ID, SHEET_NAME,
+        [(COL_INVOICE, START_ROW), (COL_URL, START_ROW), (COL_OUTPUT, START_ROW)]
+    )
     invoices = cols.get(COL_INVOICE, [])
-    rows_count = max(len(urls), len(invoices))
+    urls = cols.get(COL_URL, [])
+    outputs = cols.get(COL_OUTPUT, [])
+    rows_count = max(len(urls), len(invoices), len(outputs))
     print(f"Found up to {rows_count} rows (starting at row {START_ROW})")
 
-    for idx in range(rows_count):
+    # --- Build list of pending rows: I not empty AND L empty ---
+    pending_local_indexes = []
+    for i in range(rows_count):
+        url = (urls[i] if i < len(urls) else "").strip()
+        out = (outputs[i] if i < len(outputs) else "").strip()
+        if url and not out:
+            pending_local_indexes.append(i)
+
+    if not pending_local_indexes:
+        print("✅ No new URLs found where I has value and L is empty — skipping this run.")
+        sys.exit(0)
+
+    print(f"🟢 Found {len(pending_local_indexes)} unprocessed row(s): {[START_ROW + i for i in pending_local_indexes]}")
+
+    # --- Process only pending rows to save quota ---
+    for idx in pending_local_indexes:
         row_num = START_ROW + idx
         url = (urls[idx] if idx < len(urls) else "").strip()
         inv = (invoices[idx] if idx < len(invoices) else "").strip()
-        if not url:
-            continue
-
-        # Skip if L already has a value
-        try:
-            existing = sheets_svc.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{SHEET_NAME}!{_col_letter(COL_OUTPUT)}{row_num}"
-            ).execute().get("values", [])
-            if existing and existing[0] and existing[0][0]:
-                print(f"Row {row_num}: already processed, skipping.")
-                continue
-        except Exception as e:
-            print("Warning reading existing output:", e)
 
         print(f"\nRow {row_num}: processing invoice '{inv}' → {url}")
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf"); tmp.close()
@@ -250,7 +255,7 @@ def main():
             )
             print(f" Result size={final_size} (dpi={used_dpi}, q={used_quality})")
 
-            filename = safe_filename(inv) if inv else safe_filename(os.path.basename(url.split("?")[0]))
+            filename = safe_filename(inv) if inv else safe_filename(os.path.basename(url.split('?')[0]))
             print(" Uploading as:", filename)
             file_id, uploaded_size = upload_file_to_drive_bytes(drive_svc, pdf_bytes, filename, DEST_FOLDER_ID)
             print(" Uploaded id:", file_id, "size:", uploaded_size)
@@ -267,7 +272,9 @@ def main():
                     existing_k = sheets_svc.spreadsheets().values().get(
                         spreadsheetId=SPREADSHEET_ID, range=rng
                     ).execute().get("values", [])
-                    if not existing_k:
+                    # treat empty or blank as no value
+                    has_k = bool(existing_k and existing_k[0] and "".join(existing_k[0]).strip())
+                    if not has_k:
                         sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, 11, url)  # K=11
                 except Exception as e:
                     print("Backup to K failed:", e)
@@ -292,7 +299,7 @@ def main():
             except Exception:
                 pass
 
-    print("\n✅ All rows processed.")
+    print("\n✅ Finished pending rows only.")
 
 if __name__ == "__main__":
     main()
