@@ -32,18 +32,22 @@ jobs:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
 
-          # ---- Config VARIABLES (you already added these as repo variables) ----
-          SPREADSHEET_ID: ${{ vars.DEMO_SHEET_ID }}     # maps your variable to what runner.py expects
+          # ---- Config VARIABLES ----
+          SPREADSHEET_ID: ${{ vars.DEMO_SHEET_ID }}
           SHEET_NAME: ${{ vars.SHEET_NAME }}
           DEST_FOLDER_ID: ${{ vars.DEST_FOLDER_ID }}
 
-          # ---- Column config (I -> L; logs -> M) ----
-          COL_URL: "9"           # I = source URL
-          COL_INVOICE: "7"       # G = invoice number (filename)
+          # ---- Column config (updated: output in P/Q/R) ----
+          COL_URL: "9"                 # I = source URL
+          COL_INVOICE: "7"             # G = invoice number (filename)
           START_ROW: "2"
-          COL_OUTPUT: "12"       # L = write compressed view link
-          COL_FLAG: "13"         # M = logs
-          BACKUP_ORIGINAL_TO_K: "true"   # also copy original I→K if K is empty
+
+          # New destination columns
+          COL_DEST_INVOICE: "16"       # P = Invoice copy
+          COL_DEST_URL: "17"           # Q = Compressed PDF link
+          COL_DEST_LOG: "18"           # R = Log/Flag info
+
+          BACKUP_ORIGINAL_TO_K: "true" # optional backup of original I→K if empty
         run: |
-          echo "Debug SPREADSHEET_ID length: ${#SPREADSHEET_ID}"
+          echo "Running PDF compression..."
           python runner.py
