@@ -21,8 +21,12 @@ DEST_FOLDER_ID = os.environ.get("DEST_FOLDER_ID", "").strip()
 COL_URL = int(os.environ.get("COL_URL", "9"))            # I (source)
 COL_INVOICE = int(os.environ.get("COL_INVOICE", "7"))    # G
 START_ROW = int(os.environ.get("START_ROW", "2"))
-COL_OUTPUT = int(os.environ.get("COL_OUTPUT", "12"))     # L (destination)
-COL_FLAG = int(os.environ.get("COL_FLAG", "13"))         # M (logs)
+
+# --- NEW DESTINATION COLUMNS (P/Q/R) ---
+COL_DEST_INVOICE = int(os.environ.get("COL_DEST_INVOICE", "16"))  # P
+COL_DEST_URL     = int(os.environ.get("COL_DEST_URL", "17"))      # Q
+COL_DEST_LOG     = int(os.environ.get("COL_DEST_LOG", "18"))      # R
+
 BACKUP_ORIGINAL_TO_K = os.environ.get("BACKUP_ORIGINAL_TO_K", "true").lower() == "true"
 
 MAX_TARGET_BYTES = 1 * 1024 * 1024   # 1 MB
@@ -65,7 +69,7 @@ def _col_letter(col_idx):
         s = chr(65 + rem) + s
     return s
 
-def ensure_sheet_grid(sheets_svc, spreadsheet_id, sheet_name, min_cols=13, min_rows=2000):
+def ensure_sheet_grid(sheets_svc, spreadsheet_id, sheet_name, min_cols=18, min_rows=2000):
     ss = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets.properties").execute()
     sheet = next((s["properties"] for s in ss["sheets"] if s["properties"]["title"] == sheet_name), None)
     if not sheet:
@@ -208,29 +212,37 @@ def main():
     if not SPREADSHEET_ID:
         raise RuntimeError("SPREADSHEET_ID is empty. In your workflow, map SPREADSHEET_ID: ${{ vars.DEMO_SHEET_ID }} or set a SPREADSHEET_ID variable.")
     drive_svc, sheets_svc = get_clients()
-    ensure_sheet_grid(sheets_svc, SPREADSHEET_ID, SHEET_NAME, min_cols=max(COL_FLAG, COL_OUTPUT), min_rows=2000)
 
-    # --- Read needed columns in one go: G (invoice), I (source url), L (output) ---
+    # Make sure we have columns up to R
+    ensure_sheet_grid(
+        sheets_svc,
+        SPREADSHEET_ID,
+        SHEET_NAME,
+        min_cols=max(18, COL_DEST_LOG),  # at least R
+        min_rows=2000
+    )
+
+    # --- Read needed columns in one go: G (invoice), I (source url), Q (dest url) ---
     cols = sheet_get_columns(
         sheets_svc, SPREADSHEET_ID, SHEET_NAME,
-        [(COL_INVOICE, START_ROW), (COL_URL, START_ROW), (COL_OUTPUT, START_ROW)]
+        [(COL_INVOICE, START_ROW), (COL_URL, START_ROW), (COL_DEST_URL, START_ROW)]
     )
     invoices = cols.get(COL_INVOICE, [])
     urls = cols.get(COL_URL, [])
-    outputs = cols.get(COL_OUTPUT, [])
-    rows_count = max(len(urls), len(invoices), len(outputs))
+    dest_urls = cols.get(COL_DEST_URL, [])
+    rows_count = max(len(urls), len(invoices), len(dest_urls))
     print(f"Found up to {rows_count} rows (starting at row {START_ROW})")
 
-    # --- Build list of pending rows: I not empty AND L empty ---
+    # --- Build list of pending rows: I not empty AND Q empty ---
     pending_local_indexes = []
     for i in range(rows_count):
         url = (urls[i] if i < len(urls) else "").strip()
-        out = (outputs[i] if i < len(outputs) else "").strip()
-        if url and not out:
+        out_q = (dest_urls[i] if i < len(dest_urls) else "").strip()
+        if url and not out_q:
             pending_local_indexes.append(i)
 
     if not pending_local_indexes:
-        print("✅ No new URLs found where I has value and L is empty — skipping this run.")
+        print("✅ No new URLs found where I has value and Q is empty — skipping this run.")
         sys.exit(0)
 
     print(f"🟢 Found {len(pending_local_indexes)} unprocessed row(s): {[START_ROW + i for i in pending_local_indexes]}")
@@ -272,25 +284,29 @@ def main():
                     existing_k = sheets_svc.spreadsheets().values().get(
                         spreadsheetId=SPREADSHEET_ID, range=rng
                     ).execute().get("values", [])
-                    # treat empty or blank as no value
                     has_k = bool(existing_k and existing_k[0] and "".join(existing_k[0]).strip())
                     if not has_k:
                         sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, 11, url)  # K=11
                 except Exception as e:
                     print("Backup to K failed:", e)
 
-            # Write outputs
-            sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_OUTPUT, view_url)
+            # --- WRITE OUTPUTS TO P/Q/R ---
+            # P: copy invoice number from G
+            if inv:
+                sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_INVOICE, inv)
+            # Q: compressed PDF URL
+            sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_URL, view_url)
+            # R: log/flag
             sheet_update_cell(
-                sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_FLAG,
+                sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_LOG,
                 f"{flag} dpi={used_dpi} q={used_quality} size={uploaded_size}"
             )
-            print(f"Row {row_num}: done → {flag}")
+            print(f"Row {row_num}: done → wrote P/Q/R")
 
         except Exception as e:
             print("Row error:", e)
             try:
-                sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_FLAG, f"ERROR: {str(e)[:250]}")
+                sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_LOG, f"ERROR: {str(e)[:250]}")
             except Exception as ee:
                 print("Also failed to write error:", ee)
         finally:
