@@ -15,19 +15,23 @@ SCOPES = [
 ]
 
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "").strip()
+
+# ---- SOURCE ----
 SHEET_NAME = os.environ.get("SHEET_NAME", "Dispatch Details").strip()
+
+# ---- TARGET ----
+GIT_SHEET_NAME = os.environ.get("GIT_SHEET_NAME", "GIT").strip()
+
 DEST_FOLDER_ID = os.environ.get("DEST_FOLDER_ID", "").strip()
 
-COL_URL = int(os.environ.get("COL_URL", "9"))            # I (source)
-COL_INVOICE = int(os.environ.get("COL_INVOICE", "7"))    # G
-START_ROW = int(os.environ.get("START_ROW", "2"))
+COL_URL     = int(os.environ.get("COL_URL", "9"))   # I (source pdf url)
+COL_INVOICE = int(os.environ.get("COL_INVOICE", "7"))  # G (invoice)
+START_ROW   = int(os.environ.get("START_ROW", "2"))
 
-# --- NEW DESTINATION COLUMNS (P/Q/R) ---
-COL_DEST_INVOICE = int(os.environ.get("COL_DEST_INVOICE", "16"))  # P
-COL_DEST_URL     = int(os.environ.get("COL_DEST_URL", "17"))      # Q
-COL_DEST_LOG     = int(os.environ.get("COL_DEST_LOG", "18"))      # R
-
-BACKUP_ORIGINAL_TO_K = os.environ.get("BACKUP_ORIGINAL_TO_K", "true").lower() == "true"
+# ---- GIT OUTPUT ----
+GIT_COL_INVOICE = 1   # A
+GIT_COL_URL     = 2   # B
+GIT_COL_LOG     = 3   # C
 
 MAX_TARGET_BYTES = 1 * 1024 * 1024   # 1 MB
 TARGET_WIDTH_PT, TARGET_HEIGHT_PT = 595, 842  # A4 in points
@@ -39,13 +43,14 @@ DPI_STEP, QUALITY_STEP = 10, 5
 DOWNLOAD_TIMEOUT, MAX_ROWS_TO_CHECK = 60, 10000
 
 # ===================================================================
-# AUTH: OAuth Refresh Token
+# AUTH
 # ===================================================================
 def get_clients():
     required = ["GOOGLE_OAUTH_REFRESH_TOKEN", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         raise RuntimeError(f"Missing OAuth secrets: {', '.join(missing)}")
+
     creds = Credentials(
         token=None,
         refresh_token=os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"],
@@ -69,7 +74,7 @@ def _col_letter(col_idx):
         s = chr(65 + rem) + s
     return s
 
-def ensure_sheet_grid(sheets_svc, spreadsheet_id, sheet_name, min_cols=18, min_rows=2000):
+def ensure_sheet_grid(sheets_svc, spreadsheet_id, sheet_name, min_cols=10, min_rows=2000):
     ss = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets.properties").execute()
     sheet = next((s["properties"] for s in ss["sheets"] if s["properties"]["title"] == sheet_name), None)
     if not sheet:
@@ -87,7 +92,6 @@ def ensure_sheet_grid(sheets_svc, spreadsheet_id, sheet_name, min_cols=18, min_r
             "fields": "gridProperties.rowCount"}})
     if reqs:
         sheets_svc.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": reqs}).execute()
-        print(f"Expanded sheet grid to {min_cols} cols × {min_rows} rows")
 
 def sheet_get_columns(sheets_svc, spreadsheet_id, sheet_name, cols_and_start):
     result = {}
@@ -102,9 +106,19 @@ def sheet_get_columns(sheets_svc, spreadsheet_id, sheet_name, cols_and_start):
 def sheet_update_cell(sheets_svc, spreadsheet_id, sheet_name, row, col, value):
     rng = f"{sheet_name}!{_col_letter(col)}{row}"
     sheets_svc.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=rng,
-        valueInputOption="RAW", body={"range": rng, "values": [[value]]}
+        spreadsheetId=spreadsheet_id,
+        range=rng,
+        valueInputOption="RAW",
+        body={"range": rng, "values": [[value]]}
     ).execute()
+
+def get_existing_git_invoices(sheets_svc, spreadsheet_id, git_sheet):
+    rng = f"{git_sheet}!A2:A{MAX_ROWS_TO_CHECK}"
+    resp = sheets_svc.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=rng
+    ).execute()
+    vals = resp.get("values", [])
+    return set(v[0].strip() for v in vals if v and v[0].strip())
 
 def extract_drive_file_id(url):
     import re
@@ -120,7 +134,7 @@ def download_drive_file_by_id(drive_svc, file_id, out_path):
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
-            status, done = downloader.next_chunk()
+            _, done = downloader.next_chunk()
     return os.path.getsize(out_path)
 
 def download_url_to_file(drive_svc, url, out_path, timeout=60):
@@ -129,8 +143,8 @@ def download_url_to_file(drive_svc, url, out_path, timeout=60):
         if fid:
             try:
                 return download_drive_file_by_id(drive_svc, fid, out_path)
-            except Exception as e:
-                print("Drive API download failed:", e, "→ falling back to HTTP")
+            except Exception:
+                pass
     r = requests.get(url, stream=True, timeout=timeout)
     r.raise_for_status()
     with open(out_path, "wb") as f:
@@ -160,9 +174,17 @@ def compose_images_to_target_size(images, target_w_pt, target_h_pt, dpi, jpeg_qu
         resized = img.resize((new_w, new_h), Image.LANCZOS)
         canvas = Image.new("RGB", (target_w_px, target_h_px), (255, 255, 255))
         canvas.paste(resized, ((target_w_px - new_w)//2, (target_h_px - new_h)//2))
-        canvases.append(resized if (new_w == target_w_px and new_h == target_h_px) else canvas)
+        canvases.append(canvas)
+
     bio = io.BytesIO()
-    canvases[0].save(bio, format="PDF", save_all=True, append_images=canvases[1:], quality=jpeg_quality, optimize=True)
+    canvases[0].save(
+        bio,
+        format="PDF",
+        save_all=True,
+        append_images=canvases[1:],
+        quality=jpeg_quality,
+        optimize=True
+    )
     bio.seek(0)
     return bio.getvalue()
 
@@ -172,9 +194,10 @@ def iterative_render_and_compress(path, w, h):
         images = render_pages_to_images(path, dpi)
         pdf_bytes = compose_images_to_target_size(images, w, h, dpi, q)
         size = len(pdf_bytes)
-        print(f"  try dpi={dpi} q={q} → {size} bytes")
+
         if size <= MAX_TARGET_BYTES:
             return pdf_bytes, size, dpi, q
+
         if q - QUALITY_STEP >= MIN_JPEG_QUALITY:
             q -= QUALITY_STEP
         elif dpi - DPI_STEP >= MIN_DPI:
@@ -193,9 +216,12 @@ def upload_file_to_drive_bytes(drive_svc, pdf_bytes, filename, folder_id):
 
 def set_file_public_anyone(drive_svc, file_id):
     try:
-        drive_svc.permissions().create(fileId=file_id, body={"role": "reader", "type": "anyone"}).execute()
-    except Exception as e:
-        print("Warning: set public failed:", e)
+        drive_svc.permissions().create(
+            fileId=file_id,
+            body={"role": "reader", "type": "anyone"}
+        ).execute()
+    except Exception:
+        pass
 
 def safe_filename(s):
     s = (s or "").strip()
@@ -210,112 +236,100 @@ def safe_filename(s):
 # ===================================================================
 def main():
     if not SPREADSHEET_ID:
-        raise RuntimeError("SPREADSHEET_ID is empty. In your workflow, map SPREADSHEET_ID: ${{ vars.DEMO_SHEET_ID }} or set a SPREADSHEET_ID variable.")
+        raise RuntimeError("SPREADSHEET_ID missing")
+
     drive_svc, sheets_svc = get_clients()
 
-    # Make sure we have columns up to R
-    ensure_sheet_grid(
-        sheets_svc,
-        SPREADSHEET_ID,
-        SHEET_NAME,
-        min_cols=max(18, COL_DEST_LOG),  # at least R
-        min_rows=2000
-    )
+    # ensure sheets
+    ensure_sheet_grid(sheets_svc, SPREADSHEET_ID, SHEET_NAME, min_cols=10)
+    ensure_sheet_grid(sheets_svc, SPREADSHEET_ID, GIT_SHEET_NAME, min_cols=3)
 
-    # --- Read needed columns in one go: G (invoice), I (source url), Q (dest url) ---
+    # load existing GIT invoices
+    existing_git_invoices = get_existing_git_invoices(
+        sheets_svc, SPREADSHEET_ID, GIT_SHEET_NAME
+    )
+    print(f"Found {len(existing_git_invoices)} invoices already in GIT")
+
+    # read source columns
     cols = sheet_get_columns(
         sheets_svc, SPREADSHEET_ID, SHEET_NAME,
-        [(COL_INVOICE, START_ROW), (COL_URL, START_ROW), (COL_DEST_URL, START_ROW)]
+        [(COL_INVOICE, START_ROW), (COL_URL, START_ROW)]
     )
     invoices = cols.get(COL_INVOICE, [])
     urls = cols.get(COL_URL, [])
-    dest_urls = cols.get(COL_DEST_URL, [])
-    rows_count = max(len(urls), len(invoices), len(dest_urls))
-    print(f"Found up to {rows_count} rows (starting at row {START_ROW})")
+    rows_count = max(len(urls), len(invoices))
 
-    # --- Build list of pending rows: I not empty AND Q empty ---
-    pending_local_indexes = []
+    # build pending list
+    pending = []
     for i in range(rows_count):
         url = (urls[i] if i < len(urls) else "").strip()
-        out_q = (dest_urls[i] if i < len(dest_urls) else "").strip()
-        if url and not out_q:
-            pending_local_indexes.append(i)
+        inv = (invoices[i] if i < len(invoices) else "").strip()
+        if url and inv and inv not in existing_git_invoices:
+            pending.append(i)
 
-    if not pending_local_indexes:
-        print("✅ No new URLs found where I has value and Q is empty — skipping this run.")
-        sys.exit(0)
+    if not pending:
+        print("✅ No new invoices to process.")
+        return
 
-    print(f"🟢 Found {len(pending_local_indexes)} unprocessed row(s): {[START_ROW + i for i in pending_local_indexes]}")
+    print(f"🟢 Processing {len(pending)} new invoice(s)")
 
-    # --- Process only pending rows to save quota ---
-    for idx in pending_local_indexes:
+    for idx in pending:
         row_num = START_ROW + idx
-        url = (urls[idx] if idx < len(urls) else "").strip()
-        inv = (invoices[idx] if idx < len(invoices) else "").strip()
+        url = urls[idx].strip()
+        inv = invoices[idx].strip()
 
-        print(f"\nRow {row_num}: processing invoice '{inv}' → {url}")
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf"); tmp.close()
+        print(f"\nProcessing invoice {inv} from row {row_num}")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp.close()
 
         try:
-            print(" Downloading source PDF...")
-            dl_size = download_url_to_file(drive_svc, url, tmp.name, timeout=DOWNLOAD_TIMEOUT)
-            print(f" Downloaded {dl_size} bytes")
+            # download
+            download_url_to_file(drive_svc, url, tmp.name, timeout=DOWNLOAD_TIMEOUT)
 
-            print(f" Rendering & compressing to ≤ {MAX_TARGET_BYTES} bytes ...")
+            # compress
             pdf_bytes, final_size, used_dpi, used_quality = iterative_render_and_compress(
                 tmp.name, TARGET_WIDTH_PT, TARGET_HEIGHT_PT
             )
-            print(f" Result size={final_size} (dpi={used_dpi}, q={used_quality})")
 
-            filename = safe_filename(inv) if inv else safe_filename(os.path.basename(url.split('?')[0]))
-            print(" Uploading as:", filename)
-            file_id, uploaded_size = upload_file_to_drive_bytes(drive_svc, pdf_bytes, filename, DEST_FOLDER_ID)
-            print(" Uploaded id:", file_id, "size:", uploaded_size)
-
+            # upload
+            filename = safe_filename(inv)
+            file_id, uploaded_size = upload_file_to_drive_bytes(
+                drive_svc, pdf_bytes, filename, DEST_FOLDER_ID
+            )
             set_file_public_anyone(drive_svc, file_id)
 
             view_url = f"https://drive.google.com/uc?export=view&id={file_id}"
             flag = "COMPRESSED" if uploaded_size <= MAX_TARGET_BYTES else "LARGE_FILE"
 
-            # Optional: backup original to K if empty
-            if BACKUP_ORIGINAL_TO_K:
-                try:
-                    rng = f"{SHEET_NAME}!K{row_num}"
-                    existing_k = sheets_svc.spreadsheets().values().get(
-                        spreadsheetId=SPREADSHEET_ID, range=rng
-                    ).execute().get("values", [])
-                    has_k = bool(existing_k and existing_k[0] and "".join(existing_k[0]).strip())
-                    if not has_k:
-                        sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, 11, url)  # K=11
-                except Exception as e:
-                    print("Backup to K failed:", e)
+            # find next empty row in GIT
+            git_vals = sheets_svc.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"{GIT_SHEET_NAME}!A2:A{MAX_ROWS_TO_CHECK}"
+            ).execute().get("values", [])
+            git_next_row = len(git_vals) + 2
 
-            # --- WRITE OUTPUTS TO P/Q/R ---
-            # P: copy invoice number from G
-            if inv:
-                sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_INVOICE, inv)
-            # Q: compressed PDF URL
-            sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_URL, view_url)
-            # R: log/flag
-            sheet_update_cell(
-                sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_LOG,
-                f"{flag} dpi={used_dpi} q={used_quality} size={uploaded_size}"
-            )
-            print(f"Row {row_num}: done → wrote P/Q/R")
+            # write to GIT
+            sheet_update_cell(sheets_svc, SPREADSHEET_ID, GIT_SHEET_NAME,
+                              git_next_row, GIT_COL_INVOICE, inv)
+            sheet_update_cell(sheets_svc, SPREADSHEET_ID, GIT_SHEET_NAME,
+                              git_next_row, GIT_COL_URL, view_url)
+            sheet_update_cell(sheets_svc, SPREADSHEET_ID, GIT_SHEET_NAME,
+                              git_next_row, GIT_COL_LOG,
+                              f"{flag} dpi={used_dpi} q={used_quality} size={uploaded_size}")
+
+            print(f"✅ Added to GIT row {git_next_row}: {inv}")
 
         except Exception as e:
-            print("Row error:", e)
-            try:
-                sheet_update_cell(sheets_svc, SPREADSHEET_ID, SHEET_NAME, row_num, COL_DEST_LOG, f"ERROR: {str(e)[:250]}")
-            except Exception as ee:
-                print("Also failed to write error:", ee)
+            print("❌ Error:", e)
+
         finally:
             try:
                 os.remove(tmp.name)
             except Exception:
                 pass
 
-    print("\n✅ Finished pending rows only.")
+    print("\n🎉 Finished all new invoices.")
 
 if __name__ == "__main__":
     main()
