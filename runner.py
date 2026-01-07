@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 # ===================================================================
-# CONFIG (env-driven)
+# CONFIG
 # ===================================================================
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -24,8 +24,8 @@ GIT_SHEET_NAME = os.environ.get("GIT_SHEET_NAME", "GIT").strip()
 
 DEST_FOLDER_ID = os.environ.get("DEST_FOLDER_ID", "").strip()
 
-COL_URL     = int(os.environ.get("COL_URL", "9"))   # I (source pdf url)
-COL_INVOICE = int(os.environ.get("COL_INVOICE", "7"))  # G (invoice)
+COL_URL     = int(os.environ.get("COL_URL", "9"))   # I
+COL_INVOICE = int(os.environ.get("COL_INVOICE", "7"))  # G
 START_ROW   = int(os.environ.get("START_ROW", "2"))
 
 # ---- GIT OUTPUT ----
@@ -33,8 +33,10 @@ GIT_COL_INVOICE = 1   # A
 GIT_COL_URL     = 2   # B
 GIT_COL_LOG     = 3   # C
 
-MAX_TARGET_BYTES = 1 * 1024 * 1024   # 1 MB
-TARGET_WIDTH_PT, TARGET_HEIGHT_PT = 595, 842  # A4 in points
+# ---- STRICT SIZE LIMIT ----
+MAX_TARGET_BYTES = 100 * 1024   # 100 KB only
+
+TARGET_WIDTH_PT, TARGET_HEIGHT_PT = 595, 842  # A4
 
 START_DPI, MIN_DPI = 150, 72
 START_JPEG_QUALITY, MIN_JPEG_QUALITY = 85, 30
@@ -188,23 +190,36 @@ def compose_images_to_target_size(images, target_w_pt, target_h_pt, dpi, jpeg_qu
     bio.seek(0)
     return bio.getvalue()
 
+# ===================================================================
+# STRICT COMPRESSION (≤ 100 KB)
+# ===================================================================
 def iterative_render_and_compress(path, w, h):
     dpi, q = START_DPI, START_JPEG_QUALITY
+
     while True:
         images = render_pages_to_images(path, dpi)
         pdf_bytes = compose_images_to_target_size(images, w, h, dpi, q)
         size = len(pdf_bytes)
 
+        print(f"try → dpi={dpi}, q={q}, size={size}")
+
         if size <= MAX_TARGET_BYTES:
             return pdf_bytes, size, dpi, q
 
+        # reduce quality first
         if q - QUALITY_STEP >= MIN_JPEG_QUALITY:
             q -= QUALITY_STEP
-        elif dpi - DPI_STEP >= MIN_DPI:
+            continue
+
+        # then reduce DPI
+        if dpi - DPI_STEP >= MIN_DPI:
             dpi -= DPI_STEP
             q = START_JPEG_QUALITY
-        else:
-            return pdf_bytes, size, dpi, q
+            continue
+
+        # last fallback
+        print("⚠️ Could not reach 100 KB, using smallest possible output")
+        return pdf_bytes, size, dpi, q
 
 def upload_file_to_drive_bytes(drive_svc, pdf_bytes, filename, folder_id):
     media = MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf", resumable=True)
@@ -240,7 +255,7 @@ def main():
 
     drive_svc, sheets_svc = get_clients()
 
-    # ensure sheets
+    # ensure sheets exist
     ensure_sheet_grid(sheets_svc, SPREADSHEET_ID, SHEET_NAME, min_cols=10)
     ensure_sheet_grid(sheets_svc, SPREADSHEET_ID, GIT_SHEET_NAME, min_cols=3)
 
@@ -297,12 +312,19 @@ def main():
             file_id, uploaded_size = upload_file_to_drive_bytes(
                 drive_svc, pdf_bytes, filename, DEST_FOLDER_ID
             )
+
+            # strict check
+            if uploaded_size > MAX_TARGET_BYTES:
+                raise RuntimeError(
+                    f"Compressed file > 100 KB ({uploaded_size} bytes)"
+                )
+
             set_file_public_anyone(drive_svc, file_id)
 
             view_url = f"https://drive.google.com/uc?export=view&id={file_id}"
-            flag = "COMPRESSED" if uploaded_size <= MAX_TARGET_BYTES else "LARGE_FILE"
+            flag = "COMPRESSED"
 
-            # find next empty row in GIT
+            # next empty row in GIT
             git_vals = sheets_svc.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
                 range=f"{GIT_SHEET_NAME}!A2:A{MAX_ROWS_TO_CHECK}"
